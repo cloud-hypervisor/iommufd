@@ -1,0 +1,10 @@
+[package]
+name = "iommufd-bindings"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+license = "Apache-2.0"
+description = "Rust FFI bindings to iommufd generated using bindgen."
+repository = "https://github.com/cloud-hypervisor/iommufd"
+readme = "README.md"
+edition = "2024"
+keywords = ["iommufd"]
