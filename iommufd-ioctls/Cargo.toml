@@ -1,0 +1,15 @@
+[package]
+name = "iommufd-ioctls"
+version = "0.1.0"
+authors = ["The Cloud Hypervisor Authors"]
+license = "Apache-2.0"
+description = "Safe wrappers over IOMMUFD uAPIs"
+repository = "https://github.com/cloud-hypervisor/iommufd"
+readme = "README.md"
+edition = "2024"
+keywords = ["iommufd"]
+
+[dependencies]
+iommufd-bindings = { version = "0.1.0", path = "../iommufd-bindings" }
+thiserror = "2.0.17"
+vmm-sys-util = { version = "0.14.0" }
