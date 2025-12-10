@@ -1,0 +1,35 @@
+name: Unit tests
+on: [pull_request, create]
+
+jobs:
+  build:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.rust == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, beta]
+        target:
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ matrix.rust }})
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Unit tests
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.target != 'x86_64-unknown-linux-gnu' }}
+          command: test
+          args: --target=${{ matrix.target }} --workspace --all-targets --tests --all-features
