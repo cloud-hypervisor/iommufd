@@ -100,7 +100,7 @@ pub(crate) mod iommufd_syscall {
         // 2. The 'unmap' points to initialized memory with expected data structure,
         // and remains valid for the duration of syscall.
         // 3. The return value is checked.
-        let ret = unsafe { ioctl_with_ref(iommufd, IOMMU_IOAS_UNMAP(), unmap) };
+        let ret = unsafe { ioctl_with_mut_ref(iommufd, IOMMU_IOAS_UNMAP(), unmap) };
         if ret < 0 {
             Err(IommufdError::IommuIoasUnmap(SysError::last()))
         } else {
