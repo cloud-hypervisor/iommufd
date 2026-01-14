@@ -8,3 +8,6 @@ repository = "https://github.com/cloud-hypervisor/iommufd"
 readme = "README.md"
 edition = "2024"
 keywords = ["iommufd"]
+
+[lib]
+doctest = false
