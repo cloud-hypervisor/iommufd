@@ -8,7 +8,7 @@ specific structures, members, or constants are supported and valid for the
 kernel version they are using.
 
 Currently, the bindings are generated using bindgen version 0.72.0 and
-kernel version [v6.6](https://github.com/torvalds/linux/tree/v6.6).
+kernel version [v6.15](https://github.com/torvalds/linux/tree/v6.15).
 
 ## Regenerating Bindings
 
