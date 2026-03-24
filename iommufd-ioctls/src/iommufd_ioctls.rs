@@ -30,8 +30,33 @@ impl IommuFd {
         iommufd_syscall::alloc_iommu_ioas(self, alloc_data)
     }
 
-    pub fn map_iommu_ioas(&self, map: &iommu_ioas_map) -> Result<()> {
-        iommufd_syscall::map_iommu_ioas(self, map)
+    /// Map a region of user space memory (e.g. guest memory) into an IO
+    /// address space managed by IOMMU hardware to enable DMA for
+    /// associated VFIO devices
+    ///
+    /// # Safety
+    ///
+    /// `map.user_va field must be a u64 that,
+    /// when cast to a pointer via usize, points to `length` bytes of valid memory
+    /// to which there are no Rust references.  Furthermore, until
+    /// [`Self::unmap_iommu_ioas`] is successfully called with identical
+    /// values for iova and length, or until the entire range of
+    /// `[map.user_va..map.user_va+map.length)` has been unmapped with successful
+    /// calls to `munmap` or replaced with successful calls to `mmap(MAP_FIXED)`, the
+    /// only safe uses of the address range `[map.user_va..map.user_va+map.length)` are:
+    ///
+    /// - Atomic and/or volatile operations on raw pointers.
+    /// - Sharing the underlying storage with another process or a guest VM.
+    /// - Passing a pointer to the memory to a system call (such as `read()`
+    ///   or `write()`) that is safe regardless of the memory's contents.
+    /// - Passing a raw pointer to functions that only do one of the above things.
+    ///
+    /// In particular, creating a Rust reference to this memory is
+    /// instant undefined behavior due to the Rust aliasing rules.
+    /// It is also undefined behavior to call this function if a Rust
+    /// reference to this memory is live.
+    pub unsafe fn map_iommu_ioas(&self, map: &iommu_ioas_map) -> Result<()> {
+        unsafe { iommufd_syscall::map_iommu_ioas(self, map) }
     }
     pub fn unmap_iommu_ioas(&self, unmap: &mut iommu_ioas_unmap) -> Result<()> {
         iommufd_syscall::unmap_iommu_ioas(self, unmap)
@@ -81,7 +106,32 @@ pub(crate) mod iommufd_syscall {
         }
     }
 
-    pub(crate) fn map_iommu_ioas(iommufd: &IommuFd, map: &iommu_ioas_map) -> Result<()> {
+    /// Map a region of user space memory (e.g. guest memory) into an IO
+    /// address space managed by IOMMU hardware to enable DMA for
+    /// associated VFIO devices
+    ///
+    /// # Safety
+    ///
+    /// `map.user_va field must be a u64 that,
+    /// when cast to a pointer via usize, points to `length` bytes of valid memory
+    /// to which there are no Rust references.  Furthermore, until
+    /// `unmap_iommu_ioas` is successfully called with identical
+    /// values for iova and length, or until the entire range of
+    /// `[map.user_va..map.user_va+map.length)` has been unmapped with successful
+    /// calls to `munmap` or replaced with successful calls to `mmap(MAP_FIXED)`, the
+    /// only safe uses of the address range `[map.user_va..map.user_va+map.length)` are:
+    ///
+    /// - Atomic and/or volatile operations on raw pointers.
+    /// - Sharing the underlying storage with another process or a guest VM.
+    /// - Passing a pointer to the memory to a system call (such as `read()`
+    ///   or `write()`) that is safe regardless of the memory's contents.
+    /// - Passing a raw pointer to functions that only do one of the above things.
+    ///
+    /// In particular, creating a Rust reference to this memory is
+    /// instant undefined behavior due to the Rust aliasing rules.
+    /// It is also undefined behavior to call this function if a Rust
+    /// reference to this memory is live.
+    pub(crate) unsafe fn map_iommu_ioas(iommufd: &IommuFd, map: &iommu_ioas_map) -> Result<()> {
         // SAFETY:
         // 1. The file descriptor provided by 'iommufd' is valid and open.
         // 2. The 'map' points to initialized memory with expected data structure,
