@@ -18,6 +18,8 @@ pub use iommufd_ioctls::*;
 pub enum IommufdError {
     #[error("failed to open /dev/iommufd: {0}")]
     OpenIommufd(#[source] io::Error),
+    #[error("failed to destroy iommufd object: {0}")]
+    IommuDestroy(#[source] SysError),
     #[error("failed to allocate IOAS: {0}")]
     IommuIoasAlloc(#[source] SysError),
     #[error("failed to map an IOVA range to the IOAS: {0}")]
