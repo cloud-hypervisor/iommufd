@@ -26,6 +26,14 @@ impl IommuFd {
         Ok(IommuFd { iommufd })
     }
 
+    pub fn destroy_iommu_object(&self, id: u32) -> Result<()> {
+        let destroy_data = iommu_destroy {
+            size: std::mem::size_of::<iommu_destroy>() as u32,
+            id,
+        };
+        iommufd_syscall::destroy_iommu_object(self, &destroy_data)
+    }
+
     pub fn alloc_iommu_ioas(&self, alloc_data: &mut iommu_ioas_alloc) -> Result<()> {
         iommufd_syscall::alloc_iommu_ioas(self, alloc_data)
     }
@@ -44,6 +52,7 @@ impl AsRawFd for IommuFd {
     }
 }
 
+ioctl_io_nr!(IOMMU_DESTROY, IOMMUFD_TYPE as u32, IOMMUFD_CMD_DESTROY);
 ioctl_io_nr!(
     IOMMU_IOAS_ALLOC,
     IOMMUFD_TYPE as u32,
@@ -63,6 +72,23 @@ ioctl_io_nr!(
 pub(crate) mod iommufd_syscall {
     use super::*;
     use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref};
+
+    pub(crate) fn destroy_iommu_object(
+        iommufd: &IommuFd,
+        destroy_data: &iommu_destroy,
+    ) -> Result<()> {
+        // SAFETY:
+        // 1. The file descriptor provided by 'iommufd' is valid and open.
+        // 2. The 'destroy_data' points to initialized memory with expected data structure,
+        // and remains valid for the duration of sysca
+        // 3. The return value is checked.
+        let ret = unsafe { ioctl_with_ref(iommufd, IOMMU_DESTROY(), destroy_data) };
+        if ret < 0 {
+            Err(IommufdError::IommuDestroy(SysError::last()))
+        } else {
+            Ok(())
+        }
+    }
 
     pub(crate) fn alloc_iommu_ioas(
         iommufd: &IommuFd,
@@ -115,6 +141,7 @@ mod tests {
 
     #[test]
     fn test_iommufd_ioctl_code() {
+        assert_eq!(IOMMU_DESTROY(), 15232);
         assert_eq!(IOMMU_IOAS_ALLOC(), 15233);
         assert_eq!(IOMMU_IOAS_MAP(), 15237);
         assert_eq!(IOMMU_IOAS_UNMAP(), 15238);

@@ -3,6 +3,8 @@
 ## Changed
 
 ## Added
+- [[9]](https://github.com/cloud-hypervisor/iommufd/pull/9) Add `Iommufd::destroy_iommu_object` to release iommufd
+  objects explicitly.
 
 ## Fixed
 
