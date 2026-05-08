@@ -26,6 +26,12 @@ impl IommuFd {
         Ok(IommuFd { iommufd })
     }
 
+    /// New from an already-opened `/dev/iommu` file. Caller transfers
+    /// ownership; closing the fd is now `IommuFd`'s responsibility.
+    pub fn new_from_fd(file: File) -> Self {
+        IommuFd { iommufd: file }
+    }
+
     pub fn destroy_iommu_object(&self, id: u32) -> Result<()> {
         let destroy_data = iommu_destroy {
             size: std::mem::size_of::<iommu_destroy>() as u32,
