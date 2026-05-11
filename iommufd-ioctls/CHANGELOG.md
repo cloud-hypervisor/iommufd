@@ -3,13 +3,20 @@
 ## Changed
 
 ## Added
+
+## Fixed
+
+# [v0.2.0]
+
+## Changed
+
+## Added
 - [[9]](https://github.com/cloud-hypervisor/iommufd/pull/9) Add `Iommufd::destroy_iommu_object` to release iommufd
   objects explicitly.
 - [[9]](https://github.com/cloud-hypervisor/iommufd/pull/9) Add `Iommufd::new_from_fd` to construct a `Iommufd` from
   a pre-opened iommufd file.
 
 ## Fixed
-
 
 # [v0.1.0]
 
