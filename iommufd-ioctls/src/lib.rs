@@ -26,6 +26,16 @@ pub enum IommufdError {
     IommuIoasMap(#[source] SysError),
     #[error("failed to unmap an IOVA range from the IOAS: {0}")]
     IommuIoasUnmap(#[source] SysError),
+    #[error("failed to allocate HWPT: {0}")]
+    IommuHwptAlloc(#[source] SysError),
+    #[error("failed to allocate vIOMMU: {0}")]
+    IommuViommuAlloc(#[source] SysError),
+    #[error("failed to allocate vDevice: {0}")]
+    IommuVdeviceAlloc(#[source] SysError),
+    #[error("failed to get HW info: {0}")]
+    IommuGetHwInfo(#[source] SysError),
+    #[error("failed to invalidate HWPT: {0}")]
+    IommuHwptInvalidate(#[source] SysError),
 }
 
 pub type Result<T> = std::result::Result<T, IommufdError>;
