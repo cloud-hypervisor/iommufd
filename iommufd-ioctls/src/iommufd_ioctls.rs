@@ -5,6 +5,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::Arc;
 
 use iommufd_bindings::iommufd::*;
 use vmm_sys_util::errno::Error as SysError;
@@ -70,6 +71,303 @@ impl IommuFd {
 
     pub fn alloc_iommu_vdevice(&self, vdevice_alloc: &mut iommu_vdevice_alloc) -> Result<()> {
         iommufd_syscall::alloc_iommu_vdevice(self, vdevice_alloc)
+    }
+
+    pub fn device_hw_info(
+        &self,
+        dev_id: u32,
+        hw_info_data: &mut IommufdHwInfoData,
+    ) -> Result<iommu_hw_info> {
+        let mut hw_info = match hw_info_data {
+            IommufdHwInfoData::Smmuv3(data) => iommu_hw_info {
+                size: std::mem::size_of::<iommu_hw_info>() as u32,
+                dev_id,
+                data_len: std::mem::size_of::<iommu_hw_info_arm_smmuv3>() as u32,
+                data_uptr: data as *mut _ as u64,
+                ..Default::default()
+            },
+        };
+
+        self.get_hw_info(&mut hw_info)?;
+
+        Ok(hw_info)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum IommufdInvalidateData {
+    Smmuv3(iommu_viommu_arm_smmuv3_invalidate),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum IommuKind {
+    Smmuv3,
+    Smmuv3Cmdqv,
+    Unsupported(iommu_hw_info_type),
+}
+
+impl IommuKind {
+    fn reports(iommufd: &IommuFd, dev_id: u32, hw_info_type: iommu_hw_info_type) -> bool {
+        let mut hw_info = iommu_hw_info {
+            size: std::mem::size_of::<iommu_hw_info>() as u32,
+            flags: iommufd_hw_info_flags_IOMMU_HW_INFO_FLAG_INPUT_TYPE,
+            dev_id,
+            __bindgen_anon_1: iommu_hw_info__bindgen_ty_1 {
+                in_data_type: hw_info_type,
+            },
+            ..Default::default()
+        };
+
+        iommufd.get_hw_info(&mut hw_info).is_ok()
+    }
+
+    #[allow(non_upper_case_globals)]
+    fn query(iommufd: &IommuFd, dev_id: u32) -> Result<Self> {
+        let mut hw_info = iommu_hw_info {
+            size: std::mem::size_of::<iommu_hw_info>() as u32,
+            dev_id,
+            ..Default::default()
+        };
+        iommufd.get_hw_info(&mut hw_info)?;
+
+        // SAFETY: the union holds one `__u32` under either name.
+        let hw_info_type = unsafe { hw_info.__bindgen_anon_1.out_data_type };
+
+        match hw_info_type {
+            iommu_hw_info_type_IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV => Ok(IommuKind::Smmuv3Cmdqv),
+            iommu_hw_info_type_IOMMU_HW_INFO_TYPE_ARM_SMMUV3 => {
+                if Self::reports(
+                    iommufd,
+                    dev_id,
+                    iommu_hw_info_type_IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV,
+                ) {
+                    Ok(IommuKind::Smmuv3Cmdqv)
+                } else {
+                    Ok(IommuKind::Smmuv3)
+                }
+            }
+            _ => Ok(IommuKind::Unsupported(hw_info_type)),
+        }
+    }
+}
+
+pub struct IommufdVIommu {
+    iommufd: Arc<IommuFd>,
+    viommu_id: u32,
+    s2_hwpt_id: u32,
+    bypass_hwpt_id: Option<u32>,
+    abort_hwpt_id: Option<u32>,
+    kind: IommuKind,
+}
+
+impl IommufdVIommu {
+    pub fn new(iommufd: Arc<IommuFd>, ioas_id: u32, dev_id: u32) -> Result<Self> {
+        let kind = IommuKind::query(&iommufd, dev_id)?;
+
+        let (bypass_s1_hwpt_data, abort_s1_hwpt_data) = match kind {
+            IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv => {
+                const SMMU_STE_VALID: u64 = 1 << 0;
+                const SMMU_STE_CFG_BYPASS: u64 = 1 << 3;
+
+                (
+                    IommufdHwptData::Smmuv3(iommu_hwpt_arm_smmuv3 {
+                        ste: [SMMU_STE_CFG_BYPASS | SMMU_STE_VALID, 0x0],
+                    }),
+                    IommufdHwptData::Smmuv3(iommu_hwpt_arm_smmuv3 {
+                        ste: [SMMU_STE_VALID, 0x0],
+                    }),
+                )
+            }
+            IommuKind::Unsupported(hw_info_type) => {
+                return Err(IommufdError::UnsupportedIommu(hw_info_type));
+            }
+        };
+
+        let mut s2_iommufd_hwpt_alloc = iommu_hwpt_alloc {
+            size: std::mem::size_of::<iommu_hwpt_alloc>() as u32,
+            flags: iommufd_hwpt_alloc_flags_IOMMU_HWPT_ALLOC_NEST_PARENT,
+            dev_id,
+            pt_id: ioas_id,
+            data_type: iommu_hwpt_data_type_IOMMU_HWPT_DATA_NONE,
+            ..Default::default()
+        };
+        iommufd.alloc_iommu_hwpt(&mut s2_iommufd_hwpt_alloc)?;
+        let s2_hwpt_id = s2_iommufd_hwpt_alloc.out_hwpt_id;
+
+        let mut viommu_alloc = iommu_viommu_alloc {
+            size: std::mem::size_of::<iommu_viommu_alloc>() as u32,
+            type_: iommu_viommu_type_IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
+            hwpt_id: s2_hwpt_id,
+            dev_id,
+            ..Default::default()
+        };
+        iommufd.alloc_iommu_viommu(&mut viommu_alloc)?;
+        let viommu_id = viommu_alloc.out_viommu_id;
+
+        let mut viommu = IommufdVIommu {
+            iommufd,
+            viommu_id,
+            s2_hwpt_id,
+            bypass_hwpt_id: None,
+            abort_hwpt_id: None,
+            kind,
+        };
+        viommu.bypass_hwpt_id = Some(viommu.alloc_s1_hwpt(dev_id, &bypass_s1_hwpt_data)?);
+        viommu.abort_hwpt_id = Some(viommu.alloc_s1_hwpt(dev_id, &abort_s1_hwpt_data)?);
+
+        Ok(viommu)
+    }
+
+    pub fn alloc_s1_hwpt(&self, dev_id: u32, hwpt_data: &IommufdHwptData) -> Result<u32> {
+        let (data_type, data_len, data_uptr) = match (self.kind, hwpt_data) {
+            (IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv, IommufdHwptData::Smmuv3(data)) => (
+                iommu_hwpt_data_type_IOMMU_HWPT_DATA_ARM_SMMUV3,
+                std::mem::size_of::<iommu_hwpt_arm_smmuv3>() as u32,
+                data as *const iommu_hwpt_arm_smmuv3 as u64,
+            ),
+            (kind, _) => return Err(IommufdError::IommuTypeMismatch(kind)),
+        };
+
+        let mut hwpt_alloc = iommu_hwpt_alloc {
+            size: std::mem::size_of::<iommu_hwpt_alloc>() as u32,
+            dev_id,
+            pt_id: self.viommu_id,
+            data_type,
+            data_len,
+            data_uptr,
+            ..Default::default()
+        };
+        self.iommufd.alloc_iommu_hwpt(&mut hwpt_alloc)?;
+
+        Ok(hwpt_alloc.out_hwpt_id)
+    }
+
+    pub fn invalidate(&self, cmd: &mut IommufdInvalidateData) -> Result<bool> {
+        match (self.kind, cmd) {
+            (IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv, IommufdInvalidateData::Smmuv3(data)) => {
+                let mut hw_invalidate = iommu_hwpt_invalidate {
+                    size: std::mem::size_of::<iommu_hwpt_invalidate>() as u32,
+                    hwpt_id: self.viommu_id,
+                    data_type:
+                        iommu_hwpt_invalidate_data_type_IOMMU_VIOMMU_INVALIDATE_DATA_ARM_SMMUV3,
+                    entry_len: std::mem::size_of::<iommu_viommu_arm_smmuv3_invalidate>() as u32,
+                    entry_num: 1,
+                    data_uptr: data as *mut iommu_viommu_arm_smmuv3_invalidate as u64,
+                    ..Default::default()
+                };
+                self.iommufd.invalidate_hwpt(&mut hw_invalidate)?;
+
+                if hw_invalidate.entry_num == 1 {
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            (kind, _) => Err(IommufdError::IommuTypeMismatch(kind)),
+        }
+    }
+}
+
+impl Drop for IommufdVIommu {
+    fn drop(&mut self) {
+        for (id, what) in [
+            (self.bypass_hwpt_id, "bypass_hwpt"),
+            (self.abort_hwpt_id, "abort_hwpt"),
+            (Some(self.viommu_id), "vIOMMU"),
+            (Some(self.s2_hwpt_id), "s2_hwpt"),
+        ] {
+            let Some(id) = id else { continue };
+            if let Err(e) = self.iommufd.destroy_iommu_object(id) {
+                eprintln!("Failed to destroy {what} id {id}: {e}");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum IommufdHwInfoData {
+    Smmuv3(iommu_hw_info_arm_smmuv3),
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum IommufdHwptData {
+    Smmuv3(iommu_hwpt_arm_smmuv3),
+}
+
+pub struct IommufdVDevice {
+    viommu: Arc<IommufdVIommu>,
+    dev_id: u32,
+    virt_id: u64,
+    vdevice_id: u32,
+    s1_hwpt_id: Option<u32>,
+}
+
+impl IommufdVDevice {
+    pub fn new(viommu: Arc<IommufdVIommu>, dev_id: u32, virt_id: u64) -> Result<Self> {
+        let mut vdevice_alloc = iommu_vdevice_alloc {
+            size: std::mem::size_of::<iommu_vdevice_alloc>() as u32,
+            viommu_id: viommu.viommu_id,
+            dev_id,
+            virt_id,
+            ..Default::default()
+        };
+        viommu.iommufd.alloc_iommu_vdevice(&mut vdevice_alloc)?;
+
+        Ok(IommufdVDevice {
+            viommu,
+            dev_id,
+            virt_id,
+            vdevice_id: vdevice_alloc.out_vdevice_id,
+            s1_hwpt_id: None,
+        })
+    }
+
+    pub fn allocate_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<u32> {
+        if self.s1_hwpt_id.is_some() {
+            return Err(IommufdError::S1HwptAlreadyAllocated(self.vdevice_id));
+        }
+
+        let s1_hwpt_id = self.viommu.alloc_s1_hwpt(self.dev_id, hwpt_data)?;
+        self.s1_hwpt_id = Some(s1_hwpt_id);
+
+        Ok(s1_hwpt_id)
+    }
+
+    pub fn destroy_s1_hwpt(&mut self) -> Result<()> {
+        if let Some(s1_hwpt_id) = self.s1_hwpt_id {
+            self.viommu.iommufd.destroy_iommu_object(s1_hwpt_id)?;
+            self.s1_hwpt_id = None;
+        }
+        Ok(())
+    }
+
+    pub fn hw_info(&self, hw_info_data: &mut IommufdHwInfoData) -> Result<iommu_hw_info> {
+        match (self.viommu.kind, &hw_info_data) {
+            (IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv, IommufdHwInfoData::Smmuv3(_)) => {}
+            (kind, _) => return Err(IommufdError::IommuTypeMismatch(kind)),
+        }
+
+        self.viommu
+            .iommufd
+            .device_hw_info(self.dev_id, hw_info_data)
+    }
+
+    pub fn virt_id(&self) -> u64 {
+        self.virt_id
+    }
+}
+
+impl Drop for IommufdVDevice {
+    fn drop(&mut self) {
+        if let Some(s1_hwpt_id) = self.s1_hwpt_id
+            && let Err(e) = self.viommu.iommufd.destroy_iommu_object(s1_hwpt_id)
+        {
+            eprintln!("Failed to destroy s1_hwpt id {s1_hwpt_id}: {e}");
+        }
+
+        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.vdevice_id) {
+            eprintln!("Failed to destroy vDevice id {}: {e}", self.vdevice_id);
+        }
     }
 }
 
