@@ -48,6 +48,8 @@ pub enum IommufdError {
     IommuTypeMismatch(IommuKind),
     #[error("S1 HWPT already allocated with for the given vDevice: {0}")]
     S1HwptAlreadyAllocated(u32),
+    #[error("failed to attach the device to a page table: {0}")]
+    AttachHwpt(#[source] io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, IommufdError>;

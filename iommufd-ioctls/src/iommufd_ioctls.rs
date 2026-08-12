@@ -258,6 +258,28 @@ impl IommufdVIommu {
         Ok(hwpt_alloc.out_hwpt_id)
     }
 
+    pub fn attach_bypass(&self, device: &dyn AttachHwpt) -> Result<()> {
+        self.attach(
+            device,
+            self.bypass_hwpt_id
+                .expect("bypass table is allocated by `new`"),
+        )
+    }
+
+    pub fn attach_abort(&self, device: &dyn AttachHwpt) -> Result<()> {
+        self.attach(
+            device,
+            self.abort_hwpt_id
+                .expect("abort table is allocated by `new`"),
+        )
+    }
+
+    fn attach(&self, device: &dyn AttachHwpt, hwpt_id: u32) -> Result<()> {
+        device
+            .attach_hwpt(hwpt_id)
+            .map_err(IommufdError::AttachHwpt)
+    }
+
     pub fn invalidate(&self, cmd: &mut IommufdInvalidateData) -> Result<bool> {
         match (self.kind, cmd) {
             (IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv, IommufdInvalidateData::Smmuv3(data)) => {
@@ -454,6 +476,12 @@ pub enum IommufdHwptData {
     Smmuv3(iommu_hwpt_arm_smmuv3),
 }
 
+/// A device attachable to an iommufd page table.
+pub trait AttachHwpt: Send + Sync {
+    /// Attach the device to the HW page table.
+    fn attach_hwpt(&self, pt_id: u32) -> std::io::Result<()>;
+}
+
 pub struct IommufdVDevice {
     viommu: Arc<IommufdVIommu>,
     dev_id: u32,
@@ -482,7 +510,7 @@ impl IommufdVDevice {
         })
     }
 
-    pub fn allocate_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<u32> {
+    fn allocate_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<u32> {
         if self.s1_hwpt_id.is_some() {
             return Err(IommufdError::S1HwptAlreadyAllocated(self.vdevice_id));
         }
@@ -493,12 +521,36 @@ impl IommufdVDevice {
         Ok(s1_hwpt_id)
     }
 
-    pub fn destroy_s1_hwpt(&mut self) -> Result<()> {
+    fn destroy_s1_hwpt(&mut self) -> Result<()> {
         if let Some(s1_hwpt_id) = self.s1_hwpt_id {
             self.viommu.iommufd.destroy_iommu_object(s1_hwpt_id)?;
             self.s1_hwpt_id = None;
         }
         Ok(())
+    }
+
+    pub fn install_s1_hwpt(
+        &mut self,
+        device: &dyn AttachHwpt,
+        hwpt_data: &IommufdHwptData,
+    ) -> Result<()> {
+        let s1_hwpt_id = self.allocate_s1_hwpt(hwpt_data)?;
+
+        device
+            .attach_hwpt(s1_hwpt_id)
+            .map_err(IommufdError::AttachHwpt)?;
+
+        Ok(())
+    }
+
+    pub fn uninstall_s1_hwpt(&mut self, device: &dyn AttachHwpt, abort: bool) -> Result<()> {
+        if abort {
+            self.viommu.attach_abort(device)?;
+        } else {
+            self.viommu.attach_bypass(device)?;
+        }
+
+        self.destroy_s1_hwpt()
     }
 
     pub fn hw_info(&self, hw_info_data: &mut IommufdHwInfoData) -> Result<iommu_hw_info> {
