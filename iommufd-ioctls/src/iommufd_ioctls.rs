@@ -108,6 +108,10 @@ impl IommuFd {
 
         Ok((veventq_alloc.out_veventq_id, file))
     }
+
+    pub fn alloc_hw_queue(&self, hw_queue_alloc: &mut iommu_hw_queue_alloc) -> Result<()> {
+        iommufd_syscall::alloc_hw_queue(self, hw_queue_alloc)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -167,6 +171,12 @@ impl IommuKind {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum IommufdViommuData {
+    Smmuv3,
+    Tegra241Cmdqv { mmap_offset: u64, mmap_length: u64 },
+}
+
 pub struct IommufdVIommu {
     iommufd: Arc<IommuFd>,
     viommu_id: u32,
@@ -174,18 +184,28 @@ pub struct IommufdVIommu {
     bypass_hwpt_id: Option<u32>,
     abort_hwpt_id: Option<u32>,
     kind: IommuKind,
+    data: IommufdViommuData,
 }
 
 impl IommufdVIommu {
-    pub fn new(iommufd: Arc<IommuFd>, ioas_id: u32, dev_id: u32) -> Result<Self> {
+    #[allow(non_upper_case_globals)]
+    pub fn new(iommufd: Arc<IommuFd>, ioas_id: u32, dev_id: u32, hw_queue: bool) -> Result<Self> {
         let kind = IommuKind::query(&iommufd, dev_id)?;
+        if hw_queue && kind != IommuKind::Smmuv3Cmdqv {
+            return Err(IommufdError::HwQueueUnsupported);
+        }
 
-        let (bypass_s1_hwpt_data, abort_s1_hwpt_data) = match kind {
+        let (viommu_type, bypass_s1_hwpt_data, abort_s1_hwpt_data) = match kind {
             IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv => {
                 const SMMU_STE_VALID: u64 = 1 << 0;
                 const SMMU_STE_CFG_BYPASS: u64 = 1 << 3;
 
                 (
+                    if hw_queue {
+                        iommu_viommu_type_IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV
+                    } else {
+                        iommu_viommu_type_IOMMU_VIOMMU_TYPE_ARM_SMMUV3
+                    },
                     IommufdHwptData::Smmuv3(iommu_hwpt_arm_smmuv3 {
                         ste: [SMMU_STE_CFG_BYPASS | SMMU_STE_VALID, 0x0],
                     }),
@@ -212,12 +232,28 @@ impl IommufdVIommu {
 
         let mut viommu_alloc = iommu_viommu_alloc {
             size: std::mem::size_of::<iommu_viommu_alloc>() as u32,
-            type_: iommu_viommu_type_IOMMU_VIOMMU_TYPE_ARM_SMMUV3,
-            hwpt_id: s2_hwpt_id,
+            type_: viommu_type,
             dev_id,
+            hwpt_id: s2_hwpt_id,
             ..Default::default()
         };
-        iommufd.alloc_iommu_viommu(&mut viommu_alloc)?;
+        let data = match viommu_type {
+            iommu_viommu_type_IOMMU_VIOMMU_TYPE_ARM_SMMUV3 => {
+                iommufd.alloc_iommu_viommu(&mut viommu_alloc)?;
+                IommufdViommuData::Smmuv3
+            }
+            iommu_viommu_type_IOMMU_VIOMMU_TYPE_TEGRA241_CMDQV => {
+                let mut cmdqv_data = iommu_viommu_tegra241_cmdqv::default();
+                viommu_alloc.data_len = std::mem::size_of::<iommu_viommu_tegra241_cmdqv>() as u32;
+                viommu_alloc.data_uptr = &mut cmdqv_data as *mut iommu_viommu_tegra241_cmdqv as u64;
+                iommufd.alloc_iommu_viommu(&mut viommu_alloc)?;
+                IommufdViommuData::Tegra241Cmdqv {
+                    mmap_offset: cmdqv_data.out_vintf_mmap_offset,
+                    mmap_length: cmdqv_data.out_vintf_mmap_length,
+                }
+            }
+            _ => return Err(IommufdError::UnsupportedViommuType(viommu_type)),
+        };
         let viommu_id = viommu_alloc.out_viommu_id;
 
         let mut viommu = IommufdVIommu {
@@ -227,6 +263,7 @@ impl IommufdVIommu {
             bypass_hwpt_id: None,
             abort_hwpt_id: None,
             kind,
+            data,
         };
         viommu.bypass_hwpt_id = Some(viommu.alloc_s1_hwpt(dev_id, &bypass_s1_hwpt_data)?);
         viommu.abort_hwpt_id = Some(viommu.alloc_s1_hwpt(dev_id, &abort_s1_hwpt_data)?);
@@ -256,6 +293,14 @@ impl IommufdVIommu {
         self.iommufd.alloc_iommu_hwpt(&mut hwpt_alloc)?;
 
         Ok(hwpt_alloc.out_hwpt_id)
+    }
+
+    pub fn data(&self) -> IommufdViommuData {
+        self.data
+    }
+
+    pub fn iommufd(&self) -> &Arc<IommuFd> {
+        &self.iommufd
     }
 
     pub fn attach_bypass(&self, device: &dyn AttachHwpt) -> Result<()> {
@@ -305,6 +350,10 @@ impl IommufdVIommu {
         }
     }
 
+    pub fn hw_queue_support(&self) -> bool {
+        matches!(self.data, IommufdViommuData::Tegra241Cmdqv { .. })
+    }
+
     pub fn allocate_veventq(self: &Arc<Self>, depth: u32) -> Result<IommufdVEventQ> {
         let veventq_type = match self.kind {
             IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv => {
@@ -314,6 +363,22 @@ impl IommufdVIommu {
                 return Err(IommufdError::UnsupportedIommu(hw_info_type));
             }
         };
+        self.alloc_veventq(veventq_type, depth)
+    }
+
+    pub fn allocate_cmdqv_veventq(self: &Arc<Self>, depth: u32) -> Result<IommufdVEventQ> {
+        let veventq_type = iommu_veventq_type_IOMMU_VEVENTQ_TYPE_TEGRA241_CMDQV;
+        if !matches!(self.data, IommufdViommuData::Tegra241Cmdqv { .. }) {
+            return Err(IommufdError::UnsupportedVeventqType(veventq_type));
+        }
+        self.alloc_veventq(veventq_type, depth)
+    }
+
+    fn alloc_veventq(
+        self: &Arc<Self>,
+        veventq_type: iommu_veventq_type,
+        depth: u32,
+    ) -> Result<IommufdVEventQ> {
         let mut veventq_alloc = iommu_veventq_alloc {
             size: std::mem::size_of::<iommu_veventq_alloc>() as u32,
             viommu_id: self.viommu_id,
@@ -330,6 +395,49 @@ impl IommufdVIommu {
             file: ManuallyDrop::new(file),
             last_sequence: None,
         })
+    }
+
+    pub fn allocate_hw_queue(
+        self: &Arc<Self>,
+        index: u32,
+        base_addr: u64,
+        length: u64,
+    ) -> Result<IommufdHwQueue> {
+        let hw_queue_type = match self.data {
+            IommufdViommuData::Tegra241Cmdqv { .. } => {
+                iommu_hw_queue_type_IOMMU_HW_QUEUE_TYPE_TEGRA241_CMDQV
+            }
+            IommufdViommuData::Smmuv3 => return Err(IommufdError::HwQueueUnsupported),
+        };
+
+        let mut hw_queue_alloc = iommu_hw_queue_alloc {
+            size: std::mem::size_of::<iommu_hw_queue_alloc>() as u32,
+            viommu_id: self.viommu_id,
+            type_: hw_queue_type,
+            index,
+            nesting_parent_iova: base_addr,
+            length,
+            ..Default::default()
+        };
+        self.iommufd.alloc_hw_queue(&mut hw_queue_alloc)?;
+
+        Ok(IommufdHwQueue {
+            viommu: Arc::clone(self),
+            hw_queue_id: hw_queue_alloc.out_hw_queue_id,
+        })
+    }
+}
+
+pub struct IommufdHwQueue {
+    viommu: Arc<IommufdVIommu>,
+    hw_queue_id: u32,
+}
+
+impl Drop for IommufdHwQueue {
+    fn drop(&mut self) {
+        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.hw_queue_id) {
+            eprintln!("Failed to destroy HW queue id {}: {e}", self.hw_queue_id);
+        }
     }
 }
 
@@ -352,6 +460,7 @@ impl Drop for IommufdVIommu {
 #[derive(Debug, Copy, Clone)]
 pub enum IommufdVEventData {
     Smmuv3(iommu_vevent_arm_smmuv3),
+    Tegra241Cmdqv(iommu_vevent_tegra241_cmdqv),
 }
 
 /// A decoded virtual event.
@@ -365,6 +474,8 @@ pub struct IommufdVEvent {
 fn vevent_record_len(veventq_type: iommu_veventq_type) -> Option<usize> {
     if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_ARM_SMMUV3 {
         Some(std::mem::size_of::<iommu_vevent_arm_smmuv3>())
+    } else if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_TEGRA241_CMDQV {
+        Some(std::mem::size_of::<iommu_vevent_tegra241_cmdqv>())
     } else {
         None
     }
@@ -380,6 +491,10 @@ fn decode_vevent_record(
         if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_ARM_SMMUV3 {
             Some(IommufdVEventData::Smmuv3(std::ptr::read_unaligned(
                 bytes.as_ptr() as *const iommu_vevent_arm_smmuv3,
+            )))
+        } else if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_TEGRA241_CMDQV {
+            Some(IommufdVEventData::Tegra241Cmdqv(std::ptr::read_unaligned(
+                bytes.as_ptr() as *const iommu_vevent_tegra241_cmdqv,
             )))
         } else {
             None
@@ -631,6 +746,11 @@ ioctl_io_nr!(
     IOMMUFD_TYPE as u32,
     IOMMUFD_CMD_VEVENTQ_ALLOC
 );
+ioctl_io_nr!(
+    IOMMU_HW_QUEUE_ALLOC,
+    IOMMUFD_TYPE as u32,
+    IOMMUFD_CMD_HW_QUEUE_ALLOC
+);
 
 // Safety:
 // - absolutely trust the underlying kernel
@@ -801,6 +921,23 @@ pub(crate) mod iommufd_syscall {
             Ok(())
         }
     }
+
+    pub(crate) fn alloc_hw_queue(
+        iommufd: &IommuFd,
+        hw_queue_alloc: &mut iommu_hw_queue_alloc,
+    ) -> Result<()> {
+        // SAFETY:
+        // 1. The file descriptor provided by 'iommufd' is valid and open.
+        // 2. The 'hw_queue_alloc' points to initialized memory with expected data structure,
+        // and remains valid for the duration of syscall.
+        // 3. The return value is checked.
+        let ret = unsafe { ioctl_with_mut_ref(iommufd, IOMMU_HW_QUEUE_ALLOC(), hw_queue_alloc) };
+        if ret < 0 {
+            Err(IommufdError::IommuHwQueueAlloc(SysError::last()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -819,5 +956,6 @@ mod tests {
         assert_eq!(IOMMU_VIOMMU_ALLOC(), 15248);
         assert_eq!(IOMMU_VDEVICE_ALLOC(), 15249);
         assert_eq!(IOMMU_VEVENTQ_ALLOC(), 15251);
+        assert_eq!(IOMMU_HW_QUEUE_ALLOC(), 15252);
     }
 }

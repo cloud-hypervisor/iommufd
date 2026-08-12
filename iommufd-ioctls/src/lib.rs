@@ -42,6 +42,14 @@ pub enum IommufdError {
     IommuVeventqAlloc(#[source] SysError),
     #[error("failed to make the vEVENTQ fd non-blocking: {0}")]
     VeventqNonBlocking(#[source] SysError),
+    #[error("failed to allocate HW queue: {0}")]
+    IommuHwQueueAlloc(#[source] SysError),
+    #[error("hardware queues are not available on this vIOMMU")]
+    HwQueueUnsupported,
+    #[error("unsupported vIOMMU type: {0}")]
+    UnsupportedViommuType(iommu_viommu_type),
+    #[error("unsupported vEVENTQ type: {0}")]
+    UnsupportedVeventqType(iommu_veventq_type),
     #[error("unsupported IOMMU: {0}")]
     UnsupportedIommu(iommu_hw_info_type),
     #[error("the data does not match the backing IOMMU: {0:?}")]
