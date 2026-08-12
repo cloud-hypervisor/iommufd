@@ -38,6 +38,10 @@ pub enum IommufdError {
     IommuGetHwInfo(#[source] SysError),
     #[error("failed to invalidate HWPT: {0}")]
     IommuHwptInvalidate(#[source] SysError),
+    #[error("failed to allocate vEVENTQ: {0}")]
+    IommuVeventqAlloc(#[source] SysError),
+    #[error("failed to make the vEVENTQ fd non-blocking: {0}")]
+    VeventqNonBlocking(#[source] SysError),
     #[error("unsupported IOMMU: {0}")]
     UnsupportedIommu(iommu_hw_info_type),
     #[error("the data does not match the backing IOMMU: {0:?}")]

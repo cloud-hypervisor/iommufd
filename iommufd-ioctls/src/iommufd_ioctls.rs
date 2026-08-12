@@ -4,7 +4,8 @@
 //
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::mem::ManuallyDrop;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 
 use iommufd_bindings::iommufd::*;
@@ -91,6 +92,21 @@ impl IommuFd {
         self.get_hw_info(&mut hw_info)?;
 
         Ok(hw_info)
+    }
+
+    pub fn alloc_veventq(&self, veventq_alloc: &mut iommu_veventq_alloc) -> Result<(u32, File)> {
+        iommufd_syscall::alloc_veventq(self, veventq_alloc)?;
+
+        // SAFETY: valid fd opened and owned by us.
+        let file = unsafe { File::from_raw_fd(veventq_alloc.out_veventq_fd as RawFd) };
+
+        // SAFETY: FFI call on an fd we own and the return value is checked.
+        let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        if ret < 0 {
+            return Err(IommufdError::VeventqNonBlocking(SysError::last()));
+        }
+
+        Ok((veventq_alloc.out_veventq_id, file))
     }
 }
 
@@ -266,6 +282,33 @@ impl IommufdVIommu {
             (kind, _) => Err(IommufdError::IommuTypeMismatch(kind)),
         }
     }
+
+    pub fn allocate_veventq(self: &Arc<Self>, depth: u32) -> Result<IommufdVEventQ> {
+        let veventq_type = match self.kind {
+            IommuKind::Smmuv3 | IommuKind::Smmuv3Cmdqv => {
+                iommu_veventq_type_IOMMU_VEVENTQ_TYPE_ARM_SMMUV3
+            }
+            IommuKind::Unsupported(hw_info_type) => {
+                return Err(IommufdError::UnsupportedIommu(hw_info_type));
+            }
+        };
+        let mut veventq_alloc = iommu_veventq_alloc {
+            size: std::mem::size_of::<iommu_veventq_alloc>() as u32,
+            viommu_id: self.viommu_id,
+            type_: veventq_type,
+            veventq_depth: depth,
+            ..Default::default()
+        };
+        let (veventq_id, file) = self.iommufd.alloc_veventq(&mut veventq_alloc)?;
+
+        Ok(IommufdVEventQ {
+            viommu: Arc::clone(self),
+            veventq_id,
+            veventq_type,
+            file: ManuallyDrop::new(file),
+            last_sequence: None,
+        })
+    }
 }
 
 impl Drop for IommufdVIommu {
@@ -280,6 +323,123 @@ impl Drop for IommufdVIommu {
             if let Err(e) = self.iommufd.destroy_iommu_object(id) {
                 eprintln!("Failed to destroy {what} id {id}: {e}");
             }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum IommufdVEventData {
+    Smmuv3(iommu_vevent_arm_smmuv3),
+}
+
+/// A decoded virtual event.
+#[derive(Debug, Copy, Clone)]
+pub struct IommufdVEvent {
+    pub header: iommufd_vevent_header,
+    pub data: Option<IommufdVEventData>,
+    pub lost: u32,
+}
+
+fn vevent_record_len(veventq_type: iommu_veventq_type) -> Option<usize> {
+    if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_ARM_SMMUV3 {
+        Some(std::mem::size_of::<iommu_vevent_arm_smmuv3>())
+    } else {
+        None
+    }
+}
+
+fn decode_vevent_record(
+    veventq_type: iommu_veventq_type,
+    bytes: &[u8],
+) -> Option<IommufdVEventData> {
+    // SAFETY: the records are `#[repr(C)]` PODs with no invalid bit pattern,
+    // the caller guarantees `bytes` covers one, and `bytes` may be unaligned.
+    unsafe {
+        if veventq_type == iommu_veventq_type_IOMMU_VEVENTQ_TYPE_ARM_SMMUV3 {
+            Some(IommufdVEventData::Smmuv3(std::ptr::read_unaligned(
+                bytes.as_ptr() as *const iommu_vevent_arm_smmuv3,
+            )))
+        } else {
+            None
+        }
+    }
+}
+
+pub struct IommufdVEventQ {
+    viommu: Arc<IommufdVIommu>,
+    veventq_id: u32,
+    veventq_type: iommu_veventq_type,
+    file: ManuallyDrop<File>,
+    last_sequence: Option<u32>,
+}
+
+impl IommufdVEventQ {
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    pub fn veventq_type(&self) -> iommu_veventq_type {
+        self.veventq_type
+    }
+
+    pub fn read_events(&mut self) -> std::io::Result<Vec<IommufdVEvent>> {
+        use std::io::Read;
+
+        const HDR: usize = std::mem::size_of::<iommufd_vevent_header>();
+        let rec = vevent_record_len(self.veventq_type).unwrap_or(0);
+
+        let mut buf = vec![0u8; (HDR + rec) * 64];
+        let n = self.file.read(&mut buf)?;
+
+        let mut events = Vec::new();
+        let mut off = 0;
+        while off + HDR <= n {
+            // SAFETY: `iommufd_vevent_header` is a `#[repr(C)]` POD read from
+            // an inbound slice; `buf` has no alignment guarantee.
+            let header: iommufd_vevent_header =
+                unsafe { std::ptr::read_unaligned(buf[off..].as_ptr() as *const _) };
+            off += HDR;
+
+            const SEQ_SPAN: u32 = i32::MAX as u32 + 1;
+            let lost = match self.last_sequence {
+                Some(prev) => {
+                    (header.sequence.wrapping_sub(prev) & (SEQ_SPAN - 1)).saturating_sub(1)
+                }
+                None => 0,
+            };
+            self.last_sequence = Some(header.sequence);
+
+            if header.flags & iommu_veventq_flag_IOMMU_VEVENTQ_FLAG_LOST_EVENTS != 0 {
+                events.push(IommufdVEvent {
+                    header,
+                    data: None,
+                    lost,
+                });
+                continue;
+            }
+
+            if off + rec > n {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "vEVENTQ returned a truncated record",
+                ));
+            }
+            let data = decode_vevent_record(self.veventq_type, &buf[off..]);
+            off += rec;
+            events.push(IommufdVEvent { header, data, lost });
+        }
+
+        Ok(events)
+    }
+}
+
+impl Drop for IommufdVEventQ {
+    fn drop(&mut self) {
+        // SAFETY: `file` is live and never dropped anywhere else.
+        unsafe { ManuallyDrop::drop(&mut self.file) };
+
+        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.veventq_id) {
+            eprintln!("Failed to destroy vEVENTQ id {}: {e}", self.veventq_id);
         }
     }
 }
@@ -413,6 +573,11 @@ ioctl_io_nr!(
     IOMMU_VDEVICE_ALLOC,
     IOMMUFD_TYPE as u32,
     IOMMUFD_CMD_VDEVICE_ALLOC
+);
+ioctl_io_nr!(
+    IOMMU_VEVENTQ_ALLOC,
+    IOMMUFD_TYPE as u32,
+    IOMMUFD_CMD_VEVENTQ_ALLOC
 );
 
 // Safety:
@@ -567,6 +732,23 @@ pub(crate) mod iommufd_syscall {
             Ok(())
         }
     }
+
+    pub(crate) fn alloc_veventq(
+        iommufd: &IommuFd,
+        veventq_alloc: &mut iommu_veventq_alloc,
+    ) -> Result<()> {
+        // SAFETY:
+        // 1. The file descriptor provided by 'iommufd' is valid and open.
+        // 2. The 'veventq_alloc' points to initialized memory with expected data structure,
+        // and remains valid for the duration of syscall.
+        // 3. The return value is checked.
+        let ret = unsafe { ioctl_with_mut_ref(iommufd, IOMMU_VEVENTQ_ALLOC(), veventq_alloc) };
+        if ret < 0 {
+            Err(IommufdError::IommuVeventqAlloc(SysError::last()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -584,5 +766,6 @@ mod tests {
         assert_eq!(IOMMUFD_HWPT_INVALIDATE(), 15245);
         assert_eq!(IOMMU_VIOMMU_ALLOC(), 15248);
         assert_eq!(IOMMU_VDEVICE_ALLOC(), 15249);
+        assert_eq!(IOMMU_VEVENTQ_ALLOC(), 15251);
     }
 }

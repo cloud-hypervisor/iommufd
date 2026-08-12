@@ -11,5 +11,6 @@ keywords = ["iommufd"]
 
 [dependencies]
 iommufd-bindings = { version = "0.1.0", path = "../iommufd-bindings" }
+libc = "0.2.39"
 thiserror = "2.0.17"
 vmm-sys-util = { version = "0.15.0" }
