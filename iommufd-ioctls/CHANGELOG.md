@@ -6,6 +6,24 @@
 
 ## Fixed
 
+# [v0.3.0]
+
+## Changed
+- Require `iommufd-bindings` 0.2.0.
+
+## Added
+- Add `Iommufd` wrappers for the vIOMMU, vDevice, vEVENTQ and HW queue ioctls.
+- Add `IommufdVIommu` and `IommufdVDevice`, which own the lifetime of a vIOMMU,
+  its stage 2 HWPT and the per device stage 1 HWPTs, and expose invalidation and
+  hardware info queries.
+- Add `IommufdVEventQ` and ARM SMMUv3 event decoding.
+- Add the `AttachHwpt` trait so a caller can attach a device to a stage 1
+  HWPT without depending on how the device was opened.
+- Add `IommufdHwQueue` for hardware accelerated command queues, enabled with
+  the `hw_queue` flag through `IommufdVIommu::new`.
+
+## Fixed
+
 # [v0.2.0]
 
 ## Changed

@@ -14,6 +14,8 @@ pub mod iommufd_ioctls;
 
 pub use iommufd_ioctls::*;
 
+use iommufd_bindings::iommufd::*;
+
 #[derive(Debug, Error)]
 pub enum IommufdError {
     #[error("failed to open /dev/iommufd: {0}")]
@@ -26,6 +28,36 @@ pub enum IommufdError {
     IommuIoasMap(#[source] SysError),
     #[error("failed to unmap an IOVA range from the IOAS: {0}")]
     IommuIoasUnmap(#[source] SysError),
+    #[error("failed to allocate HWPT: {0}")]
+    IommuHwptAlloc(#[source] SysError),
+    #[error("failed to allocate vIOMMU: {0}")]
+    IommuViommuAlloc(#[source] SysError),
+    #[error("failed to allocate vDevice: {0}")]
+    IommuVdeviceAlloc(#[source] SysError),
+    #[error("failed to get HW info: {0}")]
+    IommuGetHwInfo(#[source] SysError),
+    #[error("failed to invalidate HWPT: {0}")]
+    IommuHwptInvalidate(#[source] SysError),
+    #[error("failed to allocate vEVENTQ: {0}")]
+    IommuVeventqAlloc(#[source] SysError),
+    #[error("failed to make the vEVENTQ fd non-blocking: {0}")]
+    VeventqNonBlocking(#[source] SysError),
+    #[error("failed to allocate HW queue: {0}")]
+    IommuHwQueueAlloc(#[source] SysError),
+    #[error("hardware queues are not available on this vIOMMU")]
+    HwQueueUnsupported,
+    #[error("unsupported vIOMMU type: {0}")]
+    UnsupportedViommuType(iommu_viommu_type),
+    #[error("unsupported vEVENTQ type: {0}")]
+    UnsupportedVeventqType(iommu_veventq_type),
+    #[error("unsupported IOMMU: {0}")]
+    UnsupportedIommu(iommu_hw_info_type),
+    #[error("the data does not match the backing IOMMU: {0:?}")]
+    IommuTypeMismatch(IommuKind),
+    #[error("S1 HWPT already allocated with for the given vDevice: {0}")]
+    S1HwptAlreadyAllocated(u32),
+    #[error("failed to attach the device to a page table: {0}")]
+    AttachHwpt(#[source] io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, IommufdError>;
