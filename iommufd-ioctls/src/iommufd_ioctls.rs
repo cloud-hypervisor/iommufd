@@ -601,6 +601,8 @@ pub enum IommufdHwptData {
 pub trait AttachHwpt: Send + Sync {
     /// Attach the device to the HW page table.
     fn attach_hwpt(&self, pt_id: u32) -> std::io::Result<()>;
+    /// Detach the device from the HW page table.
+    fn detach_hwpt(&self) -> std::io::Result<()>;
 }
 
 pub struct IommufdVDevice {

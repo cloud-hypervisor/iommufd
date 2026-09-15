@@ -6,6 +6,16 @@
 
 ## Fixed
 
+# [v0.3.1]
+
+## Changed
+
+- Extended `AttachHwpt` trait with method `detach_hwpt()` to allow the page table to be detached from the associated device.
+
+## Added
+
+## Fixed
+
 # [v0.3.0]
 
 ## Changed
