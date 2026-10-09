@@ -26,6 +26,8 @@ pub enum IommufdError {
     IommuIoasAlloc(#[source] SysError),
     #[error("failed to map an IOVA range to the IOAS: {0}")]
     IommuIoasMap(#[source] SysError),
+    #[error("failed to map a file into the IOAS: {0}")]
+    IommuIoasMapFile(#[source] SysError),
     #[error("failed to unmap an IOVA range from the IOAS: {0}")]
     IommuIoasUnmap(#[source] SysError),
     #[error("failed to allocate HWPT: {0}")]
