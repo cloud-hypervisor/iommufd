@@ -181,8 +181,42 @@ pub enum IommufdViommuData {
     Tegra241Cmdqv { mmap_offset: u64, mmap_length: u64 },
 }
 
-pub struct IommufdVIommu {
+pub struct IommufdIoas {
     iommufd: Arc<IommuFd>,
+    ioas_id: u32,
+}
+
+impl IommufdIoas {
+    pub fn new(iommufd: Arc<IommuFd>) -> Result<Self> {
+        let mut alloc_data = iommu_ioas_alloc {
+            size: size_of::<iommu_ioas_alloc>() as u32,
+            flags: 0,
+            out_ioas_id: 0,
+        };
+
+        iommufd.alloc_iommu_ioas(&mut alloc_data)?;
+
+        Ok(Self {
+            iommufd,
+            ioas_id: alloc_data.out_ioas_id,
+        })
+    }
+
+    pub fn id(&self) -> u32 {
+        self.ioas_id
+    }
+}
+
+impl Drop for IommufdIoas {
+    fn drop(&mut self) {
+        if let Err(e) = self.iommufd.destroy_iommu_object(self.ioas_id) {
+            error!("Failed to destroy IOAS id {}: {e}", self.ioas_id);
+        }
+    }
+}
+
+pub struct IommufdVIommu {
+    ioas: Arc<IommufdIoas>,
     viommu_id: u32,
     s2_hwpt_id: u32,
     bypass_hwpt_id: u32,
@@ -193,8 +227,9 @@ pub struct IommufdVIommu {
 
 impl IommufdVIommu {
     #[allow(non_upper_case_globals)]
-    pub fn new(iommufd: Arc<IommuFd>, ioas_id: u32, dev_id: u32, hw_queue: bool) -> Result<Self> {
-        let kind = IommuKind::query(&iommufd, dev_id)?;
+    pub fn new(ioas: Arc<IommufdIoas>, dev_id: u32, hw_queue: bool) -> Result<Self> {
+        let iommufd = &ioas.iommufd;
+        let kind = IommuKind::query(iommufd, dev_id)?;
         if hw_queue && kind != IommuKind::Smmuv3Cmdqv {
             return Err(IommufdError::HwQueueUnsupported);
         }
@@ -227,7 +262,7 @@ impl IommufdVIommu {
             size: std::mem::size_of::<iommu_hwpt_alloc>() as u32,
             flags: iommufd_hwpt_alloc_flags_IOMMU_HWPT_ALLOC_NEST_PARENT,
             dev_id,
-            pt_id: ioas_id,
+            pt_id: ioas.id(),
             data_type: iommu_hwpt_data_type_IOMMU_HWPT_DATA_NONE,
             ..Default::default()
         };
@@ -261,12 +296,12 @@ impl IommufdVIommu {
         let viommu_id = viommu_alloc.out_viommu_id;
 
         let bypass_hwpt_id =
-            Self::alloc_s1_hwpt_on(&iommufd, kind, viommu_id, dev_id, &bypass_s1_hwpt_data)?;
+            Self::alloc_s1_hwpt_on(iommufd, kind, viommu_id, dev_id, &bypass_s1_hwpt_data)?;
         let abort_hwpt_id =
-            Self::alloc_s1_hwpt_on(&iommufd, kind, viommu_id, dev_id, &abort_s1_hwpt_data)?;
+            Self::alloc_s1_hwpt_on(iommufd, kind, viommu_id, dev_id, &abort_s1_hwpt_data)?;
 
         Ok(IommufdVIommu {
-            iommufd,
+            ioas,
             viommu_id,
             s2_hwpt_id,
             bypass_hwpt_id,
@@ -277,7 +312,7 @@ impl IommufdVIommu {
     }
 
     pub fn alloc_s1_hwpt(&self, dev_id: u32, hwpt_data: &IommufdHwptData) -> Result<u32> {
-        Self::alloc_s1_hwpt_on(&self.iommufd, self.kind, self.viommu_id, dev_id, hwpt_data)
+        Self::alloc_s1_hwpt_on(self.iommufd(), self.kind, self.viommu_id, dev_id, hwpt_data)
     }
 
     fn alloc_s1_hwpt_on(
@@ -315,7 +350,7 @@ impl IommufdVIommu {
     }
 
     pub fn iommufd(&self) -> &Arc<IommuFd> {
-        &self.iommufd
+        &self.ioas.iommufd
     }
 
     pub fn attach_bypass(&self, device: &dyn AttachHwpt) -> Result<()> {
@@ -345,7 +380,7 @@ impl IommufdVIommu {
                     data_uptr: data as *mut iommu_viommu_arm_smmuv3_invalidate as u64,
                     ..Default::default()
                 };
-                self.iommufd.invalidate_hwpt(&mut hw_invalidate)?;
+                self.iommufd().invalidate_hwpt(&mut hw_invalidate)?;
 
                 if hw_invalidate.entry_num == 1 {
                     Ok(true)
@@ -393,7 +428,7 @@ impl IommufdVIommu {
             veventq_depth: depth,
             ..Default::default()
         };
-        let (veventq_id, file) = self.iommufd.alloc_veventq(&mut veventq_alloc)?;
+        let (veventq_id, file) = self.iommufd().alloc_veventq(&mut veventq_alloc)?;
 
         Ok(IommufdVEventQ {
             viommu: Arc::clone(self),
@@ -426,7 +461,7 @@ impl IommufdVIommu {
             length,
             ..Default::default()
         };
-        self.iommufd.alloc_hw_queue(&mut hw_queue_alloc)?;
+        self.iommufd().alloc_hw_queue(&mut hw_queue_alloc)?;
 
         Ok(IommufdHwQueue {
             viommu: Arc::clone(self),
@@ -442,7 +477,7 @@ pub struct IommufdHwQueue {
 
 impl Drop for IommufdHwQueue {
     fn drop(&mut self) {
-        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.hw_queue_id) {
+        if let Err(e) = self.viommu.iommufd().destroy_iommu_object(self.hw_queue_id) {
             error!("Failed to destroy HW queue id {}: {e}", self.hw_queue_id);
         }
     }
@@ -456,7 +491,7 @@ impl Drop for IommufdVIommu {
             (self.viommu_id, "vIOMMU"),
             (self.s2_hwpt_id, "s2_hwpt"),
         ] {
-            if let Err(e) = self.iommufd.destroy_iommu_object(id) {
+            if let Err(e) = self.iommufd().destroy_iommu_object(id) {
                 error!("Failed to destroy {what} id {id}: {e}");
             }
         }
@@ -581,7 +616,7 @@ impl Drop for IommufdVEventQ {
         // SAFETY: `file` is live and never dropped anywhere else.
         unsafe { ManuallyDrop::drop(&mut self.file) };
 
-        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.veventq_id) {
+        if let Err(e) = self.viommu.iommufd().destroy_iommu_object(self.veventq_id) {
             error!("Failed to destroy vEVENTQ id {}: {e}", self.veventq_id);
         }
     }
@@ -607,6 +642,7 @@ pub trait AttachHwpt: Send + Sync {
 
 pub struct IommufdVDevice {
     viommu: Arc<IommufdVIommu>,
+    device: Arc<dyn AttachHwpt>,
     dev_id: u32,
     virt_id: u64,
     vdevice_id: u32,
@@ -614,7 +650,12 @@ pub struct IommufdVDevice {
 }
 
 impl IommufdVDevice {
-    pub fn new(viommu: Arc<IommufdVIommu>, dev_id: u32, virt_id: u64) -> Result<Self> {
+    pub fn new(
+        viommu: Arc<IommufdVIommu>,
+        device: Arc<dyn AttachHwpt>,
+        dev_id: u32,
+        virt_id: u64,
+    ) -> Result<Self> {
         let mut vdevice_alloc = iommu_vdevice_alloc {
             size: std::mem::size_of::<iommu_vdevice_alloc>() as u32,
             viommu_id: viommu.viommu_id,
@@ -622,10 +663,11 @@ impl IommufdVDevice {
             virt_id,
             ..Default::default()
         };
-        viommu.iommufd.alloc_iommu_vdevice(&mut vdevice_alloc)?;
+        viommu.iommufd().alloc_iommu_vdevice(&mut vdevice_alloc)?;
 
         Ok(IommufdVDevice {
             viommu,
+            device,
             dev_id,
             virt_id,
             vdevice_id: vdevice_alloc.out_vdevice_id,
@@ -646,31 +688,27 @@ impl IommufdVDevice {
 
     fn destroy_s1_hwpt(&mut self) -> Result<()> {
         if let Some(s1_hwpt_id) = self.s1_hwpt_id {
-            self.viommu.iommufd.destroy_iommu_object(s1_hwpt_id)?;
+            self.viommu.iommufd().destroy_iommu_object(s1_hwpt_id)?;
             self.s1_hwpt_id = None;
         }
         Ok(())
     }
 
-    pub fn install_s1_hwpt(
-        &mut self,
-        device: &dyn AttachHwpt,
-        hwpt_data: &IommufdHwptData,
-    ) -> Result<()> {
+    pub fn install_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<()> {
         let s1_hwpt_id = self.allocate_s1_hwpt(hwpt_data)?;
 
-        device
+        self.device
             .attach_hwpt(s1_hwpt_id)
             .map_err(IommufdError::AttachHwpt)?;
 
         Ok(())
     }
 
-    pub fn uninstall_s1_hwpt(&mut self, device: &dyn AttachHwpt, abort: bool) -> Result<()> {
+    pub fn uninstall_s1_hwpt(&mut self, abort: bool) -> Result<()> {
         if abort {
-            self.viommu.attach_abort(device)?;
+            self.viommu.attach_abort(&*self.device)?;
         } else {
-            self.viommu.attach_bypass(device)?;
+            self.viommu.attach_bypass(&*self.device)?;
         }
 
         self.destroy_s1_hwpt()
@@ -683,7 +721,7 @@ impl IommufdVDevice {
         }
 
         self.viommu
-            .iommufd
+            .iommufd()
             .device_hw_info(self.dev_id, hw_info_data)
     }
 
@@ -694,13 +732,20 @@ impl IommufdVDevice {
 
 impl Drop for IommufdVDevice {
     fn drop(&mut self) {
+        if let Err(e) = self.device.detach_hwpt() {
+            error!(
+                "Failed to detach the device of vDevice id {}: {e}",
+                self.vdevice_id
+            );
+        }
+
         if let Some(s1_hwpt_id) = self.s1_hwpt_id
-            && let Err(e) = self.viommu.iommufd.destroy_iommu_object(s1_hwpt_id)
+            && let Err(e) = self.viommu.iommufd().destroy_iommu_object(s1_hwpt_id)
         {
             error!("Failed to destroy s1_hwpt id {s1_hwpt_id}: {e}");
         }
 
-        if let Err(e) = self.viommu.iommufd.destroy_iommu_object(self.vdevice_id) {
+        if let Err(e) = self.viommu.iommufd().destroy_iommu_object(self.vdevice_id) {
             error!("Failed to destroy vDevice id {}: {e}", self.vdevice_id);
         }
     }
