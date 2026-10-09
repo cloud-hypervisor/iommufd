@@ -51,6 +51,10 @@ impl IommuFd {
         iommufd_syscall::map_iommu_ioas(self, map)
     }
 
+    pub fn map_iommu_ioas_file(&self, map: &iommu_ioas_map_file) -> Result<()> {
+        iommufd_syscall::map_iommu_ioas_file(self, map)
+    }
+
     pub fn unmap_iommu_ioas(&self, unmap: &mut iommu_ioas_unmap) -> Result<()> {
         iommufd_syscall::unmap_iommu_ioas(self, unmap)
     }
@@ -204,6 +208,44 @@ impl IommufdIoas {
 
     pub fn id(&self) -> u32 {
         self.ioas_id
+    }
+
+    pub fn map_file(
+        &self,
+        fd: RawFd,
+        start: u64,
+        length: u64,
+        iova: u64,
+        writeable: bool,
+    ) -> Result<()> {
+        let mut flags = iommufd_ioas_map_flags_IOMMU_IOAS_MAP_READABLE
+            | iommufd_ioas_map_flags_IOMMU_IOAS_MAP_FIXED_IOVA;
+        if writeable {
+            flags |= iommufd_ioas_map_flags_IOMMU_IOAS_MAP_WRITEABLE;
+        }
+
+        let map = iommu_ioas_map_file {
+            size: size_of::<iommu_ioas_map_file>() as u32,
+            flags,
+            ioas_id: self.ioas_id,
+            fd,
+            start,
+            length,
+            iova,
+        };
+
+        self.iommufd.map_iommu_ioas_file(&map)
+    }
+
+    pub fn unmap(&self, iova: u64, length: u64) -> Result<()> {
+        let mut unmap = iommu_ioas_unmap {
+            size: size_of::<iommu_ioas_unmap>() as u32,
+            ioas_id: self.ioas_id,
+            iova,
+            length,
+        };
+
+        self.iommufd.unmap_iommu_ioas(&mut unmap)
     }
 }
 
@@ -765,6 +807,11 @@ ioctl_io_nr!(
 );
 ioctl_io_nr!(IOMMU_IOAS_MAP, IOMMUFD_TYPE as u32, IOMMUFD_CMD_IOAS_MAP);
 ioctl_io_nr!(
+    IOMMU_IOAS_MAP_FILE,
+    IOMMUFD_TYPE as u32,
+    IOMMUFD_CMD_IOAS_MAP_FILE
+);
+ioctl_io_nr!(
     IOMMU_IOAS_UNMAP,
     IOMMUFD_TYPE as u32,
     IOMMUFD_CMD_IOAS_UNMAP
@@ -842,6 +889,20 @@ pub(crate) mod iommufd_syscall {
         let ret = unsafe { ioctl_with_mut_ref(iommufd, IOMMU_IOAS_ALLOC(), alloc_data) };
         if ret < 0 {
             Err(IommufdError::IommuIoasAlloc(SysError::last()))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn map_iommu_ioas_file(iommufd: &IommuFd, map: &iommu_ioas_map_file) -> Result<()> {
+        // SAFETY:
+        // 1. The file descriptor provided by 'iommufd' is valid and open.
+        // 2. The 'map' points to initialized memory with expected data structure,
+        // and remains valid for the duration of syscall.
+        // 3. The return value is checked.
+        let ret = unsafe { ioctl_with_ref(iommufd, IOMMU_IOAS_MAP_FILE(), map) };
+        if ret < 0 {
+            Err(IommufdError::IommuIoasMapFile(SysError::last()))
         } else {
             Ok(())
         }
