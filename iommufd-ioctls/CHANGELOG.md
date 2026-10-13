@@ -6,6 +6,21 @@
 
 ## Fixed
 
+# [v0.3.2]
+
+## Changed
+
+- IommufdVIommu holds a reference to IommufdIoas
+
+## Added
+
+- Add IommufdIoas abstraction
+- Add IOMMU_IOAS_MAP_FILE support
+
+## Fixed
+
+- Objects are now destroyed in dependency order leading to proper teardown
+
 # [v0.3.1]
 
 ## Changed
