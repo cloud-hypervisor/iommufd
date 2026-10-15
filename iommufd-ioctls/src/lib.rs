@@ -56,8 +56,6 @@ pub enum IommufdError {
     UnsupportedIommu(iommu_hw_info_type),
     #[error("the data does not match the backing IOMMU: {0:?}")]
     IommuTypeMismatch(IommuKind),
-    #[error("S1 HWPT already allocated with for the given vDevice: {0}")]
-    S1HwptAlreadyAllocated(u32),
     #[error("failed to attach the device to a page table: {0}")]
     AttachHwpt(#[source] io::Error),
 }

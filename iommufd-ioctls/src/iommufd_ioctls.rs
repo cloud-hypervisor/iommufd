@@ -717,17 +717,6 @@ impl IommufdVDevice {
         })
     }
 
-    fn allocate_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<u32> {
-        if self.s1_hwpt_id.is_some() {
-            return Err(IommufdError::S1HwptAlreadyAllocated(self.vdevice_id));
-        }
-
-        let s1_hwpt_id = self.viommu.alloc_s1_hwpt(self.dev_id, hwpt_data)?;
-        self.s1_hwpt_id = Some(s1_hwpt_id);
-
-        Ok(s1_hwpt_id)
-    }
-
     fn destroy_s1_hwpt(&mut self) -> Result<()> {
         if let Some(s1_hwpt_id) = self.s1_hwpt_id {
             self.viommu.iommufd().destroy_iommu_object(s1_hwpt_id)?;
@@ -737,11 +726,20 @@ impl IommufdVDevice {
     }
 
     pub fn install_s1_hwpt(&mut self, hwpt_data: &IommufdHwptData) -> Result<()> {
-        let s1_hwpt_id = self.allocate_s1_hwpt(hwpt_data)?;
+        let s1_hwpt_id = self.viommu.alloc_s1_hwpt(self.dev_id, hwpt_data)?;
 
-        self.device
-            .attach_hwpt(s1_hwpt_id)
-            .map_err(IommufdError::AttachHwpt)?;
+        if let Err(e) = self.device.attach_hwpt(s1_hwpt_id) {
+            if let Err(e) = self.viommu.iommufd().destroy_iommu_object(s1_hwpt_id) {
+                error!("Failed to destroy s1_hwpt id {s1_hwpt_id}: {e}");
+            }
+            return Err(IommufdError::AttachHwpt(e));
+        }
+
+        if let Some(old_s1_hwpt_id) = self.s1_hwpt_id.replace(s1_hwpt_id)
+            && let Err(e) = self.viommu.iommufd().destroy_iommu_object(old_s1_hwpt_id)
+        {
+            error!("Failed to destroy s1_hwpt id {old_s1_hwpt_id}: {e}");
+        }
 
         Ok(())
     }
