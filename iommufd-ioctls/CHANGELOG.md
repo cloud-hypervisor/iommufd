@@ -6,6 +6,26 @@
 
 ## Fixed
 
+# [v0.4.0]
+
+## Changed
+
+- `IommufdVIommu::new()` takes an `Arc<IommufdIoas>` rather than an `IommuFd`
+  and an IOAS identifier
+- `IommufdVDevice::new()` takes the device it stands for, which
+  `install_s1_hwpt()` and `uninstall_s1_hwpt()` no longer take
+- Dropping an `IommufdVDevice` now also detaches the device from the page
+  table it is bound to, so the caller no longer has to order teardown itself
+- `install_s1_hwpt()` now replaces the page table atomically
+- Removed `IommufdError::S1HwptAlreadyAllocated`
+
+## Added
+
+- Add IommufdIoas abstraction
+- Add IOMMU_IOAS_MAP_FILE support
+
+## Fixed
+
 # [v0.3.1]
 
 ## Changed
