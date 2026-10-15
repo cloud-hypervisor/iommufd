@@ -2,9 +2,15 @@
 
 ## Changed
 
+- `IommufdVDevice::install_s1_hwpt()` replaces an installed S1 HWPT in a
+  single attach, so the device never goes through another page table.
+
 ## Added
 
 ## Fixed
+
+- `IommufdVDevice::install_s1_hwpt()` destroys the new S1 HWPT when the
+  device cannot be attached to it.
 
 # [v0.3.2]
 
