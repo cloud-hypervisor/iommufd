@@ -92,6 +92,17 @@ impl IommuFd {
                 data_uptr: data as *mut _ as u64,
                 ..Default::default()
             },
+            IommufdHwInfoData::Tegra241Cmdqv(data) => iommu_hw_info {
+                size: std::mem::size_of::<iommu_hw_info>() as u32,
+                flags: iommufd_hw_info_flags_IOMMU_HW_INFO_FLAG_INPUT_TYPE,
+                dev_id,
+                __bindgen_anon_1: iommu_hw_info__bindgen_ty_1 {
+                    in_data_type: iommu_hw_info_type_IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV,
+                },
+                data_len: std::mem::size_of::<iommu_hw_info_tegra241_cmdqv>() as u32,
+                data_uptr: data as *mut _ as u64,
+                ..Default::default()
+            },
         };
 
         self.get_hw_info(&mut hw_info)?;
@@ -667,6 +678,7 @@ impl Drop for IommufdVEventQ {
 #[derive(Debug, Copy, Clone)]
 pub enum IommufdHwInfoData {
     Smmuv3(iommu_hw_info_arm_smmuv3),
+    Tegra241Cmdqv(iommu_hw_info_tegra241_cmdqv),
 }
 
 #[derive(Debug, Copy, Clone)]
