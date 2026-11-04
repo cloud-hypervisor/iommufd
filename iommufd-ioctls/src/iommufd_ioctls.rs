@@ -6,6 +6,7 @@
 use std::fs::{File, OpenOptions};
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::Path;
 use std::sync::Arc;
 
 use iommufd_bindings::iommufd::*;
@@ -19,11 +20,21 @@ pub struct IommuFd {
 }
 
 impl IommuFd {
+    /// Open the default `/dev/iommu` character device.
     pub fn new() -> Result<Self> {
+        Self::new_from_path(Path::new("/dev/iommu"))
+    }
+
+    /// Open the iommufd character device at `path`.
+    ///
+    /// This lets a caller use an iommufd device node that is not exposed at
+    /// `/dev/iommu`, for instance in a container or a sandbox that mounts
+    /// the device nodes elsewhere.
+    pub fn new_from_path(path: &Path) -> Result<Self> {
         let iommufd = OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/dev/iommu")
+            .open(path)
             .map_err(IommufdError::OpenIommufd)?;
 
         Ok(IommuFd { iommufd })
@@ -1066,7 +1077,22 @@ pub(crate) mod iommufd_syscall {
 
 #[cfg(test)]
 mod tests {
+    use vmm_sys_util::tempfile::TempFile;
+
     use super::*;
+
+    #[test]
+    fn test_iommufd_new_from_path() {
+        let tmp = TempFile::new().unwrap();
+        let iommufd = IommuFd::new_from_path(tmp.as_path()).unwrap();
+        assert!(iommufd.as_raw_fd() >= 0);
+
+        let missing = tmp.as_path().with_file_name("nonexistent_iommufd");
+        assert!(matches!(
+            IommuFd::new_from_path(&missing),
+            Err(IommufdError::OpenIommufd(_))
+        ));
+    }
 
     #[test]
     fn test_iommufd_ioctl_code() {

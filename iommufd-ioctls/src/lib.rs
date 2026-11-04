@@ -18,7 +18,7 @@ use iommufd_bindings::iommufd::*;
 
 #[derive(Debug, Error)]
 pub enum IommufdError {
-    #[error("failed to open /dev/iommufd: {0}")]
+    #[error("failed to open iommufd: {0}")]
     OpenIommufd(#[source] io::Error),
     #[error("failed to destroy iommufd object: {0}")]
     IommuDestroy(#[source] SysError),

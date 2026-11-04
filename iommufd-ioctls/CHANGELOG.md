@@ -4,6 +4,9 @@
 
 ## Added
 
+- `IommuFd::new_from_path()`, opening the iommufd character device at a
+  caller-provided path instead of `/dev/iommu`
+
 ## Fixed
 
 # [v0.4.0]
